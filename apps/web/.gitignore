@@ -1,0 +1,12 @@
+# dependencies
+/node_modules
+
+# next
+/.next
+/out
+
+# env (비밀키 — 커밋하지 마세요)
+.env*.local
+.env
+
+.vercel

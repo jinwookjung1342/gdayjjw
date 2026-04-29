@@ -1,0 +1,11 @@
+savepoint_1 — hydration 패치 이전 민원통계 페이지 스냅샷
+
+복원 방법 (파일만 사용):
+  savepoint_1/statistics-page.tsx 를
+  apps/web/src/app/(admin)/statistics/page.tsx
+  로 복사하여 덮어쓰기
+
+Git 사용 가능한 경우 (권장):
+  패치 전 커밋에서
+  git tag -a savepoint_1 -m "before hydration fix"
+  원복: git checkout savepoint_1 -- apps/web/src/app/(admin)/statistics/page.tsx
