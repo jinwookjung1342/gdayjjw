@@ -1,0 +1,29 @@
+---
+description: JB 프로젝트 배포(Vercel·Render)·환경변수·자주 나는 문제
+alwaysApply: true
+---
+
+# 배포 빠른 참고 (커서ai / gdayjjw 모노레포)
+
+## 저장소·브랜치
+- GitHub: `jinwookjung1342/gdayjjw`, 기본 브랜치 `main`
+- 변경 후 배포: `git add` → `git commit` → `git push origin main` (먼저 `git config user.name` / `user.email` 필요)
+
+## Vercel (프런트·Next.js)
+- 프로젝트명: **jbwrccustomer**. URL: `https://jbwrccustomer.vercel.app`
+- **Root Directory**가 `apps/web` 인지 대시보드에서 확인할 것 (모노레포 표준).
+- 필수 서버 환경 변수: **`DOC_AI_API_BASE_URL`** = **`https://gdayjjw.onrender.com`**  
+  - 호스트만. `/parse`, `/parse/monthly-data`, 끝의 `/` 붙이면 안 됨.
+- 변수 저장 후 **Redeploy** 한 번 하는 것이 안전함.
+
+## Render (doc-ai / FastAPI)
+- 서비스명·URL: **gdayjjw** → `https://gdayjjw.onrender.com`
+- 저장소 설정: Root **`services/doc-ai`**, Dockerfile `services/doc-ai/Dockerfile`
+- 헬스: `GET /health` → `{"ok":true}`
+- 파싱 API: `POST /parse/monthly-data` (Vercel API가 호스트만 넣고 경로 자동 추가)
+- 무료 플랜은 미사용 시 슬립 → 첫 요청 지연 가능.
+
+## 깨졌을 때
+- 브라우저 `Not Found` + 파싱: Vercel `DOC_AI_API_BASE_URL` 값(호스트만)과 Redeploy 확인.
+- Render **Deploy failed**: Events → 빌드 로그. Dockerfile/`services/doc-ai` 경로 확인.
+- Git 커밋 실패 시: `Author identity unknown` → `git config --global user.email` / `user.name`.

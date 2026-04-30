@@ -1,0 +1,29 @@
+---
+description: 민원통계 화면 수정 시 참고할 파일·데이터 흐름
+globs: apps/web/src/app/**/statistics/**/*.{tsx,ts}
+alwaysApply: false
+---
+
+# 민원통계 (`/statistics`)
+
+## 주요 파일
+- **페이지 UI:** `apps/web/src/app/(admin)/statistics/page.tsx` (차트·월 선택·KPI 대부분)
+- **집계 API:** `apps/web/src/app/api/statistics/summary/route.ts`
+- **임베드(별도 페이지가 있으면):** `apps/web/src/app/embed/statistics/page.tsx`
+- 로컬/세션 rollup: `@/lib/month-rollup`, `@/lib/receipt-date` 등
+
+## 로컬에서 미리 보기
+```bash
+cd apps/web
+npm install
+npm run dev
+```
+브라우저: `http://localhost:3000/statistics` (로그인·세션 정책에 따라 `/login` 선행 필요할 수 있음)
+
+## 수정·배포 흐름
+1. `page.tsx` 또는 `summary/route.ts` 편집  
+2. 로컬에서 화면·API 확인  
+3. `main` 에 커밋·푸시 → Vercel 자동 배포 (설정되어 있다면)
+
+## 데이터 소스 요약
+- Supabase 및 월별 rollup(localStorage 등) 로직이 `page.tsx`/API 에 섞여 있으므로, **한 부분 고치면 차트와 숫자가 같이 바뀌는지** 꼭 확인할 것.
