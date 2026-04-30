@@ -39,11 +39,12 @@ export async function GET(request: NextRequest) {
   const from = searchParams.get("from");
   const to = searchParams.get("to");
   const keyword = (searchParams.get("keyword") ?? "").trim();
+  const recomplaintOnly = (searchParams.get("recomplaint") ?? "").trim().toUpperCase() === "Y";
 
   const params = new URLSearchParams();
   params.set(
     "select",
-    "id,receipt_number,receipt_date,complaint_scope,receipt_channel_name,business_unit_name,sales_department_name,bond_department_name,complaint_content,birth_date,age_group,ai_category,ai_subcategory,complaint_type_minor,complaint_type_major,created_at,complainant_summary,similar_case_content,company_opinion,violation_and_action,future_action_plan,is_third_party"
+    "id,receipt_number,receipt_date,complaint_scope,receipt_channel_name,business_unit_name,sales_department_name,bond_department_name,complaint_content,birth_date,age_group,ai_category,ai_subcategory,complaint_type_minor,complaint_type_major,created_at,complainant_summary,similar_case_content,company_opinion,violation_and_action,future_action_plan,is_third_party,ai_keywords"
   );
   params.set("order", "receipt_date.desc");
   params.set("limit", String(DEFAULT_LIMIT));
@@ -58,6 +59,9 @@ export async function GET(request: NextRequest) {
   if (keyword) {
     const escaped = keyword.replaceAll(",", "\\,").replaceAll("%", "\\%");
     params.set("or", `(receipt_number.ilike.*${escaped}*,complaint_content.ilike.*${escaped}*)`);
+  }
+  if (recomplaintOnly) {
+    params.set("ai_keywords", "cs.{재민원}");
   }
 
   const res = await fetch(`${config.supabaseUrl}/rest/v1/complaint_records?${params.toString()}`, {

@@ -99,6 +99,7 @@ export async function GET(request: NextRequest) {
   const month =
     request.nextUrl.searchParams.get("month") ??
     formatYearMonthLocal(new Date());
+  const recomplaintOnly = (request.nextUrl.searchParams.get("recomplaint") ?? "").trim().toUpperCase() === "Y";
   const config = getSupabaseConfig();
   if (!config) {
     return NextResponse.json({ ok: false, message: "Supabase 환경변수가 설정되지 않았습니다." }, { status: 400 });
@@ -117,12 +118,14 @@ export async function GET(request: NextRequest) {
   currentParams.append("receipt_date", `gte.${currentRange.from}`);
   currentParams.append("receipt_date", `lt.${currentRange.toExclusive}`);
   currentParams.set("limit", "5000");
+  if (recomplaintOnly) currentParams.set("ai_keywords", "cs.{재민원}");
 
   const prevParams = new URLSearchParams();
   prevParams.set("select", "id");
   prevParams.append("receipt_date", `gte.${prevRange.from}`);
   prevParams.append("receipt_date", `lt.${prevRange.toExclusive}`);
   prevParams.set("limit", "5000");
+  if (recomplaintOnly) prevParams.set("ai_keywords", "cs.{재민원}");
 
   const rollupParams = new URLSearchParams();
   rollupParams.set("select", "parsed_result");
@@ -170,15 +173,15 @@ export async function GET(request: NextRequest) {
   const totalFromDb = rows.length;
   const externalFromDb = rows.filter((row) => normScope(row.complaint_scope) === "대외").length;
   const internalFromDb = rows.filter((row) => normScope(row.complaint_scope) === "대내").length;
-  const currentRoll = latestRollup.month_rollup?.[month];
-  const prevRoll = latestRollup.month_rollup?.[prevMonth];
+  const currentRoll = recomplaintOnly ? undefined : latestRollup.month_rollup?.[month];
+  const prevRoll = recomplaintOnly ? undefined : latestRollup.month_rollup?.[prevMonth];
   const total = currentRoll?.total ?? totalFromDb;
   const external = currentRoll?.external ?? externalFromDb;
   const internal = currentRoll?.internal ?? internalFromDb;
   const prevTotal = prevRoll?.total ?? prevTotalFromDb;
   const diffRate = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : 0;
 
-  const ageFromRollup = latestRollup.month_age_rollup?.[month];
+  const ageFromRollup = recomplaintOnly ? undefined : latestRollup.month_age_rollup?.[month];
   const ageGroups =
     ageFromRollup && Object.keys(ageFromRollup).length > 0
       ? Object.entries(ageFromRollup)
@@ -211,6 +214,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     ok: true,
     month,
+    recomplaint: recomplaintOnly,
     kpi: {
       total,
       external,

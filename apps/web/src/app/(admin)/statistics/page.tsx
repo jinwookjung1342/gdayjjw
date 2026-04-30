@@ -11,6 +11,7 @@ type ChartItem = { label: string; count: number };
 type Summary = {
   ok: boolean;
   month: string;
+  recomplaint?: boolean;
   kpi: { total: number; external: number; internal: number; prevTotal: number; diffRate: number };
   charts: {
     ageGroups: ChartItem[];
@@ -36,6 +37,8 @@ type LocalRow = {
   complaint_type_major?: string | null;
   sales_department_name?: string | null;
   bond_department_name?: string | null;
+  ai_keywords?: string[] | null;
+  is_recomplaint?: boolean | null;
   /** 월별 집계 시 접수일이 비어 있으면 업로드 시각 기준으로 포함 */
   created_at?: string;
 };
@@ -72,9 +75,11 @@ export default function StatisticsPage() {
   const searchParams = useSearchParams();
   const [month, setMonth] = useState("");
   const [data, setData] = useState<Summary | null>(null);
+  const [detailRows, setDetailRows] = useState<LocalRow[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [isLocalMode, setIsLocalMode] = useState(false);
+  const [recomplaintOnly, setRecomplaintOnly] = useState(false);
 
   useEffect(() => {
     const qm = (searchParams.get("month") ?? "").trim();
@@ -88,19 +93,24 @@ export default function StatisticsPage() {
   useEffect(() => {
     if (month.length < 7) return;
     void loadSummary();
-  }, [month]);
+  }, [month, recomplaintOnly]);
+
+  useEffect(() => {
+    if (month.length < 7) return;
+    void loadDetailRows();
+  }, [month, recomplaintOnly]);
 
   async function loadSummary() {
     setLoading(true);
     setError("");
     try {
       const fromExcel = readMonthRollover()[month];
-      if (fromExcel && fromExcel.total > 0) {
+      if (!recomplaintOnly && fromExcel && fromExcel.total > 0) {
         const prevKey = previousMonthKey(month);
         const prevRoll = readMonthRollover()[prevKey];
         const prevTotal = prevRoll?.total ?? 0;
         const diffRate = prevTotal > 0 ? ((fromExcel.total - prevTotal) / prevTotal) * 100 : 0;
-        const charts = buildLocalSummary(month).charts;
+        const charts = buildLocalSummary(month, recomplaintOnly).charts;
         setData({
           ok: true,
           month,
@@ -119,8 +129,10 @@ export default function StatisticsPage() {
         return;
       }
 
-      const local = buildLocalSummary(month);
-      const response = await fetch(`/api/statistics/summary?month=${month}`);
+      const local = buildLocalSummary(month, recomplaintOnly);
+      const q = new URLSearchParams({ month });
+      if (recomplaintOnly) q.set("recomplaint", "Y");
+      const response = await fetch(`/api/statistics/summary?${q.toString()}`);
       const body = (await response.json()) as Summary & { message?: string };
       if (!response.ok || !body.ok) {
         setData(local);
@@ -140,10 +152,40 @@ export default function StatisticsPage() {
       }
       setLoading(false);
     } catch {
-      setData(buildLocalSummary(month));
+      setData(buildLocalSummary(month, recomplaintOnly));
       setIsLocalMode(true);
       setError("DB 연결이 없어 로컬 데이터 기준으로 표시합니다.");
       setLoading(false);
+    }
+  }
+
+  async function loadDetailRows() {
+    const bounds = calendarMonthBounds(month);
+    if (!bounds) {
+      setDetailRows([]);
+      return;
+    }
+    try {
+      const q = new URLSearchParams({ from: bounds.from, to: bounds.to });
+      if (recomplaintOnly) q.set("recomplaint", "Y");
+      const response = await fetch(`/api/monthly-data/records?${q.toString()}`);
+      const body = (await response.json()) as { ok?: boolean; rows?: Array<LocalRow & { ai_keywords?: string[] | null }> };
+      if (!response.ok || !body.ok || !Array.isArray(body.rows)) {
+        setDetailRows(readLocalRows().filter((row) => rowInMonth(row, month) && (!recomplaintOnly || isRecomplaintRow(row))));
+        return;
+      }
+      const mapped = body.rows.map((r) => ({
+        ...r,
+        is_recomplaint:
+          typeof r.is_recomplaint === "boolean"
+            ? r.is_recomplaint
+            : Array.isArray((r as { ai_keywords?: string[] | null }).ai_keywords)
+              ? ((r as { ai_keywords?: string[] | null }).ai_keywords ?? []).includes("재민원")
+              : false
+      }));
+      setDetailRows(mapped);
+    } catch {
+      setDetailRows(readLocalRows().filter((row) => rowInMonth(row, month) && (!recomplaintOnly || isRecomplaintRow(row))));
     }
   }
 
@@ -169,14 +211,14 @@ export default function StatisticsPage() {
     if (!data || month.length < 7) {
       return { ageGroups: "", businessMinor: "", productMajor: "", complaintTypes: "" };
     }
-    const prev = buildLocalSummary(previousMonthKey(month)).charts;
+    const prev = buildLocalSummary(previousMonthKey(month), recomplaintOnly).charts;
     return {
       ageGroups: computeChartInsight(data.charts.ageGroups ?? [], prev.ageGroups ?? []),
       businessMinor: computeChartInsight(data.charts.businessMinor ?? [], prev.businessMinor ?? []),
       productMajor: computeChartInsight(data.charts.productMajor ?? [], prev.productMajor ?? []),
       complaintTypes: computeChartInsight(data.charts.complaintTypes ?? [], prev.complaintTypes ?? []),
     };
-  }, [data, month]);
+  }, [data, month, recomplaintOnly]);
 
   if (!ready) {
     return (
@@ -241,6 +283,14 @@ export default function StatisticsPage() {
                 })}
               </select>
             </label>
+            <label className="ml-1 inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm">
+              <input
+                type="checkbox"
+                checked={recomplaintOnly}
+                onChange={(e) => setRecomplaintOnly(e.target.checked)}
+              />
+              재민원
+            </label>
           </div>
         </div>
       </div>
@@ -298,6 +348,7 @@ export default function StatisticsPage() {
             month={month}
             items={data?.charts.complaintTypes ?? []}
             insight={chartInsights.complaintTypes}
+            sourceRows={detailRows}
             className="lg:col-span-2"
           />
         </div>
@@ -546,15 +597,17 @@ function ComplaintTypeSection({
   month,
   items,
   insight,
+  sourceRows,
   className
 }: {
   month: string;
   items: ChartItem[];
   insight?: string;
+  sourceRows: LocalRow[];
   className?: string;
 }) {
   const grouped = groupComplaintTypeByMajor(items);
-  const contentsByMajor = useMemo(() => buildComplaintContentsByMajorAndLabel(month), [month]);
+  const contentsByMajor = useMemo(() => buildComplaintContentsByMajorAndLabel(month, sourceRows), [month, sourceRows]);
   return (
     <section className={`space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm ${className ?? ""}`}>
       <h4 className="text-sm font-bold text-slate-900">민원유형별 분류 (대외민원 한정)</h4>
@@ -712,11 +765,11 @@ function rowInMonth(row: LocalRow, month: string): boolean {
   return false;
 }
 
-function buildLocalSummary(month: string): Summary {
+function buildLocalSummary(month: string, recomplaintOnly = false): Summary {
   const all = readLocalRows();
-  const rows = all.filter((row) => rowInMonth(row, month));
+  const rows = all.filter((row) => rowInMonth(row, month) && (!recomplaintOnly || isRecomplaintRow(row)));
   const prevKey = previousMonthKey(month);
-  const prevRows = all.filter((row) => rowInMonth(row, prevKey));
+  const prevRows = all.filter((row) => rowInMonth(row, prevKey) && (!recomplaintOnly || isRecomplaintRow(row)));
 
   const total = rows.length;
   const external = rows.filter((row) => normScope(row.complaint_scope) === "대외").length;
@@ -729,9 +782,10 @@ function buildLocalSummary(month: string): Summary {
   return {
     ok: true,
     month,
+    recomplaint: recomplaintOnly,
     kpi: { total, external, internal, prevTotal, diffRate },
     charts: {
-      ageGroups: ageChartItemsForMonth(month),
+      ageGroups: ageChartItemsForMonth(month, recomplaintOnly, rows),
       businessMinor: groupSimple(externalRows, (row) => (row.complaint_type_minor ?? "").trim() || "미분류"),
       productMajor: groupSimple(externalRows, (row) => (row.complaint_type_major ?? "").trim() || "미분류"),
       salesDept: groupSimple(externalRows, (row) => (row.sales_department_name ?? "").trim() || "미지정"),
@@ -801,6 +855,12 @@ function readLocalRows(): LocalRow[] {
   }
 }
 
+function isRecomplaintRow(row: LocalRow): boolean {
+  if (typeof row.is_recomplaint === "boolean") return row.is_recomplaint;
+  if (Array.isArray(row.ai_keywords)) return row.ai_keywords.includes("재민원");
+  return false;
+}
+
 function groupSimple(rows: LocalRow[], selector: (row: LocalRow) => string): ChartItem[] {
   const map = new Map<string, number>();
   rows.forEach((row) => {
@@ -820,7 +880,10 @@ function complaintTypeLabelForRow(row: LocalRow): string {
   return sub;
 }
 
-function buildComplaintContentsByMajorAndLabel(month: string): Record<
+function buildComplaintContentsByMajorAndLabel(
+  month: string,
+  sourceRows: LocalRow[] = []
+): Record<
   "영업" | "채권" | "제도정책" | "기타",
   Map<string, string[]>
 > {
@@ -832,7 +895,7 @@ function buildComplaintContentsByMajorAndLabel(month: string): Record<
     기타: mk()
   };
   if (month.length < 7) return out;
-  const rows = readLocalRows().filter((row) => rowInMonth(row, month));
+  const rows = sourceRows.length > 0 ? sourceRows : readLocalRows().filter((row) => rowInMonth(row, month));
   const externalRows = rows.filter((row) => normScope(row.complaint_scope) === "대외");
   for (const row of externalRows) {
     const label = complaintTypeLabelForRow(row);
@@ -845,8 +908,19 @@ function buildComplaintContentsByMajorAndLabel(month: string): Record<
   return out;
 }
 
+function calendarMonthBounds(month: string): { from: string; to: string } | null {
+  if (!/^\d{4}-\d{2}$/.test(month)) return null;
+  const [y, m] = month.split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return null;
+  const last = new Date(y, m, 0).getDate();
+  return { from: `${month}-01`, to: `${month}-${String(last).padStart(2, "0")}` };
+}
+
 /** doc-ai `month_age_rollup` 우선: KPI·월 집계와 같은 엑셀 행·접수일 기준 전체 건수 */
-function ageChartItemsForMonth(month: string): ChartItem[] {
+function ageChartItemsForMonth(month: string, recomplaintOnly = false, scopedRows: LocalRow[] = []): ChartItem[] {
+  if (recomplaintOnly) {
+    return groupAgeBracket(scopedRows);
+  }
   const roll = readMonthAgeRollover()[month];
   if (roll && typeof roll === "object") {
     const entries = Object.entries(roll).filter(([, n]) => Number(n) > 0);

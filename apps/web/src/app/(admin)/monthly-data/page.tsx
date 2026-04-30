@@ -62,6 +62,8 @@ type ComplaintRecord = {
   age_group?: string | null;
   ai_category?: string | null;
   ai_subcategory?: string | null;
+  ai_keywords?: string[] | null;
+  is_recomplaint?: boolean | null;
   complaint_type_minor?: string | null;
   complaint_type_major?: string | null;
   /** 회신서(Word) 추출 섹션 텍스트 합본 — 이달의 민원 키워드에 사용 */
@@ -698,6 +700,32 @@ function excelText(excel: Record<string, unknown>, candidates: string[], fallbac
   return fallback;
 }
 
+function extractRecomplaintFlag(excel: Record<string, unknown>): boolean {
+  const direct = excelText(
+    excel,
+    [
+      "재민원 여부",
+      "재민원여부",
+      "재민원",
+      "재민원 여부(Y/N)",
+      "재민원여부(Y/N)",
+      "재민원여부YN"
+    ],
+    ""
+  );
+  const t0 = String(direct ?? "").trim().toUpperCase();
+  if (["Y", "YES", "TRUE", "1", "예", "해당", "재민원"].includes(t0)) return true;
+  if (["N", "NO", "FALSE", "0", "아니오", "없음"].includes(t0)) return false;
+  for (const [rawKey, rawVal] of Object.entries(excel)) {
+    const k = normalizedHeaderKey(rawKey);
+    if (!k.includes("재민원")) continue;
+    const t = String(rawVal ?? "").trim().toUpperCase();
+    if (["Y", "YES", "TRUE", "1", "예", "해당", "재민원"].includes(t)) return true;
+    if (["N", "NO", "FALSE", "0", "아니오", "없음"].includes(t)) return false;
+  }
+  return false;
+}
+
 function parseUnifiedToLocalRecords(
   unified: UnifiedRecord[],
   aiMap?: Record<string, { category: string; subcategory: string }>
@@ -706,6 +734,7 @@ function parseUnifiedToLocalRecords(
     const excel = row.excel_row ?? {};
     const rawDate = excel["접수일자"] ?? excel["접수일"];
     const ai = aiMap?.[row.receipt_number];
+    const isRecomplaint = extractRecomplaintFlag(excel);
     return {
       id: `local-${row.receipt_number}`,
       receipt_number: row.receipt_number,
@@ -720,6 +749,8 @@ function parseUnifiedToLocalRecords(
       age_group: String(excel["연령대"] ?? "").trim() || null,
       ai_category: ai?.category ?? null,
       ai_subcategory: ai?.subcategory ?? null,
+      ai_keywords: isRecomplaint ? ["재민원"] : [],
+      is_recomplaint: isRecomplaint,
       complaint_type_minor: excelText(excel, ["민원유형(소)", "민원유형소", "민원유형 소", "민원유형_소"], ""),
       complaint_type_major: excelText(excel, ["민원유형", "민원 유형"], ""),
       word_sections: sanitizeWordSectionsPayload(row.word_sections),
@@ -752,6 +783,7 @@ function parsePreviewRowsToLocalRecords(rows: ParseResult["preview_rows"]): Comp
         routeText.includes("소비자보호원") ||
         routeText.includes("소비자원");
       const rawDate = excel["접수일자"] ?? excel["접수일"];
+      const isRecomplaint = extractRecomplaintFlag(excel);
       return {
         id: `local-${row.receipt_number}`,
         receipt_number: row.receipt_number,
@@ -764,6 +796,8 @@ function parsePreviewRowsToLocalRecords(rows: ParseResult["preview_rows"]): Comp
         complaint_content: excelText(excel, ["민원내용", "민원 내용"], row.word_sections?.complainant_summary ?? "내용 미입력"),
         birth_date: excel["생년월일"] ? String(excel["생년월일"]).replaceAll(".", "-").slice(0, 10) : null,
         age_group: String(excel["연령대"] ?? "").trim() || null,
+        ai_keywords: isRecomplaint ? ["재민원"] : [],
+        is_recomplaint: isRecomplaint,
         complaint_type_minor: excelText(excel, ["민원유형(소)", "민원유형소", "민원유형 소", "민원유형_소"], ""),
         complaint_type_major: excelText(excel, ["민원유형", "민원 유형"], ""),
         word_sections: sanitizeWordSectionsPayload(row.word_sections),

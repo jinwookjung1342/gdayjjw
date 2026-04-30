@@ -101,6 +101,33 @@ function normalizeBoolean(raw: unknown): boolean | null {
   return null;
 }
 
+function extractRecomplaintFlag(excel: Record<string, unknown>): boolean {
+  const direct = excelText(
+    excel,
+    [
+      "재민원 여부",
+      "재민원여부",
+      "재민원",
+      "재민원 여부(Y/N)",
+      "재민원여부(Y/N)",
+      "재민원여부YN"
+    ],
+    ""
+  );
+  const parsedDirect = normalizeBoolean(direct);
+  if (parsedDirect !== null) return parsedDirect;
+
+  for (const [rawKey, rawVal] of Object.entries(excel)) {
+    const k = normalizedHeaderKey(rawKey);
+    if (!k.includes("재민원")) continue;
+    const parsed = normalizeBoolean(rawVal);
+    if (parsed !== null) return parsed;
+    const t = String(rawVal ?? "").trim();
+    if (/재민원/u.test(t)) return true;
+  }
+  return false;
+}
+
 const CLASSIFICATION_GUIDE = [
   { category: "영업", subcategories: ["계약사실상이(부인)", "담보차량인수부인", "담보차량 결함", "설명의무 위반", "불법영업", "기타 판매과정 불만"] },
   { category: "채권", subcategories: ["과다/고압 독촉", "가압류 취하 미흡", "근저당 해지 절차", "채권 매각 관련", "채권추심관련 금지행위"] },
@@ -126,6 +153,48 @@ function sanitizeAiCategoryForDb(category: string): "영업" | "채권" | "고�
 function truncStr(value: string, max: number): string {
   if (value.length <= max) return value;
   return value.slice(0, max);
+}
+
+function toStorageSafeName(name: string): string {
+  return name.replace(/[^\w.\-()가-힣\s]/g, "_").replace(/\s+/g, " ").trim();
+}
+
+async function ensureStorageBucket(supabaseUrl: string, serviceRoleKey: string, bucketId: string) {
+  const commonHeaders = {
+    apikey: serviceRoleKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    "Content-Type": "application/json"
+  };
+  const check = await fetch(`${supabaseUrl}/storage/v1/bucket/${encodeURIComponent(bucketId)}`, {
+    method: "GET",
+    headers: commonHeaders
+  });
+  if (check.ok) return;
+  await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+    method: "POST",
+    headers: commonHeaders,
+    body: JSON.stringify({ id: bucketId, name: bucketId, public: false })
+  });
+}
+
+async function uploadToSupabaseStorage(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  bucketId: string,
+  objectPath: string,
+  file: File
+): Promise<boolean> {
+  const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${bucketId}/${objectPath}`, {
+    method: "POST",
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": file.type || "application/octet-stream",
+      "x-upsert": "true"
+    },
+    body: Buffer.from(await file.arrayBuffer())
+  });
+  return uploadRes.ok;
 }
 
 function dedupeByReceiptNumber<T extends { receipt_number: string }>(rows: T[]): { rows: T[]; dropped: number } {
@@ -199,8 +268,9 @@ async function classifyComplaintWithAI(text: string, minorHint?: string): Promis
   return fallbackComplaintAiLabel(normalized, hint);
 }
 
-async function persistToSupabase(parseData: ParseResponse, excelFileName: string, wordFileNames: string[]) {
+async function persistToSupabase(parseData: ParseResponse, excelFile: File, wordFiles: File[]) {
   const unified = parseData.unified_records ?? [];
+  const excelFileName = excelFile.name;
   const aiLabelsByReceipt: Record<string, AiLabel> = {};
   await Promise.all(
     unified
@@ -247,12 +317,35 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
   }
   const uploadBatchId = batchJson[0].id;
 
+  const bucketId = "source-files";
+  await ensureStorageBucket(supabaseUrl, serviceRoleKey, bucketId);
+  const excelStorageObjectPath = `${monthKey}/${uploadBatchId}/excel/${toStorageSafeName(excelFile.name)}`;
+  const excelUploaded = await uploadToSupabaseStorage(
+    supabaseUrl,
+    serviceRoleKey,
+    bucketId,
+    excelStorageObjectPath,
+    excelFile
+  );
+  const receiptByWordName = new Map<string, string>();
+  for (const row of unified) {
+    if (!row.word_file_name || !row.receipt_number) continue;
+    receiptByWordName.set(row.word_file_name, row.receipt_number);
+  }
+  const wordUploads = await Promise.all(
+    wordFiles.map(async (file) => {
+      const objPath = `${monthKey}/${uploadBatchId}/word/${toStorageSafeName(file.name)}`;
+      const ok = await uploadToSupabaseStorage(supabaseUrl, serviceRoleKey, bucketId, objPath, file);
+      return { file, objPath, ok };
+    })
+  );
+
   const sourcePayload = [
     {
       upload_batch_id: uploadBatchId,
       file_type: "excel",
       file_name: excelFileName,
-      storage_path: `local/${excelFileName}`,
+      storage_path: excelUploaded ? `storage://${bucketId}/${excelStorageObjectPath}` : `local/${excelFileName}`,
       parsed_status: "parsed",
       parsed_result: {
         rows: parseData.excel_total,
@@ -260,13 +353,15 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
         month_age_rollup: parseData.month_age_rollup ?? {}
       }
     },
-    ...wordFileNames.map((name) => ({
+    ...wordUploads.map(({ file, objPath, ok }) => ({
       upload_batch_id: uploadBatchId,
       file_type: "word",
-      file_name: name,
-      storage_path: `local/${name}`,
+      file_name: file.name,
+      storage_path: ok ? `storage://${bucketId}/${objPath}` : `local/${file.name}`,
       parsed_status: "parsed",
-      parsed_result: {}
+      parsed_result: {
+        receipt_number: receiptByWordName.get(file.name) ?? null
+      }
     }))
   ];
   await fetch(`${supabaseUrl}/rest/v1/source_files`, {
@@ -286,6 +381,7 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
       aiLabelsByReceipt[row.receipt_number] = ai;
       const complaintTypeMinor = excelText(excel, ["민원유형(소)", "민원유형소", "민원유형 소", "민원유형_소"], "");
       const complaintTypeMajor = excelText(excel, ["민원유형", "민원 유형"], "");
+      const isRecomplaint = extractRecomplaintFlag(excel);
       return {
         receipt_number: String(row.receipt_number).trim(),
         receipt_date: toIsoDate(excel["접수일자"] ?? excel["접수일"]),
@@ -302,6 +398,7 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
         complaint_content: complaintContent,
         ai_category: sanitizeAiCategoryForDb(ai.category),
         ai_subcategory: truncStr(ai.subcategory, 100),
+        ai_keywords: isRecomplaint ? ["재민원"] : [],
         complainant_summary: ws.complainant_summary ?? null,
         similar_case_content: ws.similar_case_content ?? null,
         company_opinion: ws.company_opinion ?? null,
@@ -497,8 +594,8 @@ export async function POST(request: Request) {
     const parseData = data as ParseResponse;
     const persistResult = await persistToSupabase(
       parseData,
-      excelFile.name,
-      wordFiles.filter((file): file is File => file instanceof File).map((file) => file.name)
+      excelFile,
+      wordFiles.filter((file): file is File => file instanceof File)
     );
     return NextResponse.json({ ...parseData, ...persistResult });
   } catch (err) {
