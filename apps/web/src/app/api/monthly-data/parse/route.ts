@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { normalizeSupabaseOrigin } from "@/lib/supabase-env";
 
 /** Vercel 등에서 doc-ai 호출이 길어질 때 기본 10초 제한을 피하기 위함(플랜별 상한 있음). */
 export const maxDuration = 60;
@@ -193,8 +194,8 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
   );
 
   try {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = normalizeSupabaseOrigin(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
   if (!supabaseUrl || !serviceRoleKey) {
     return {
       persisted: false,

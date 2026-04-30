@@ -1,12 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
+import { normalizeSupabaseOrigin } from "@/lib/supabase-env";
 
 const DEFAULT_LIMIT = 5000;
 
 function getSupabaseConfig() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = normalizeSupabaseOrigin(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
   if (!supabaseUrl || !serviceRoleKey) return null;
   return { supabaseUrl, serviceRoleKey };
+}
+
+function summarizeSupabaseError(data: unknown): string {
+  if (typeof data !== "object" || data === null) return "";
+  const o = data as Record<string, unknown>;
+  const parts = [
+    typeof o.code === "string" ? o.code : "",
+    typeof o.message === "string" ? o.message : "",
+    typeof o.hint === "string" ? o.hint : ""
+  ].filter(Boolean);
+  return parts.join(" — ").slice(0, 220);
 }
 
 function supabaseHeaders(serviceRoleKey: string) {
@@ -36,8 +48,13 @@ export async function GET(request: NextRequest) {
   params.set("order", "receipt_date.desc");
   params.set("limit", String(DEFAULT_LIMIT));
 
-  if (from) params.set("receipt_date", `gte.${from}`);
-  if (to) params.set("receipt_date", `lte.${to}`);
+  if (from && to) {
+    params.set("and", `(receipt_date.gte.${from},receipt_date.lte.${to})`);
+  } else if (from) {
+    params.set("receipt_date", `gte.${from}`);
+  } else if (to) {
+    params.set("receipt_date", `lte.${to}`);
+  }
   if (keyword) {
     const escaped = keyword.replaceAll(",", "\\,").replaceAll("%", "\\%");
     params.set("or", `(receipt_number.ilike.*${escaped}*,complaint_content.ilike.*${escaped}*)`);
@@ -50,7 +67,9 @@ export async function GET(request: NextRequest) {
   const data = (await res.json()) as unknown;
 
   if (!res.ok) {
-    return NextResponse.json({ ok: false, message: "데이터 조회에 실패했습니다.", detail: data }, { status: res.status });
+    const hint = summarizeSupabaseError(data);
+    const message = hint ? `데이터 조회에 실패했습니다. (${hint})` : "데이터 조회에 실패했습니다.";
+    return NextResponse.json({ ok: false, message, detail: data }, { status: res.status });
   }
 
   return NextResponse.json({

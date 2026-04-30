@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fallbackComplaintSubtypeString } from "@/lib/complaint-label-fallback";
+import { normalizeSupabaseOrigin } from "@/lib/supabase-env";
 
 type RecordRow = {
   id: string;
@@ -18,8 +19,8 @@ type RecordRow = {
 };
 
 function getSupabaseConfig() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = normalizeSupabaseOrigin(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
   if (!supabaseUrl || !serviceRoleKey) return null;
   return { supabaseUrl, serviceRoleKey };
 }
