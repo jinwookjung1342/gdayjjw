@@ -14,6 +14,7 @@ import {
 
 const LOCAL_RECORDS_KEY = "jb_monthly_data_records";
 const FSSC_EDIT_STORAGE_PREFIX = "jb_monthly_issues_fssc_edit_";
+const INSIGHT_STORAGE_PREFIX = "jb_monthly_issues_insight_";
 
 type IssueRow = {
   receipt_number?: string;
@@ -95,6 +96,16 @@ function saveFsscDraft(month: string, draft: FsscEditDraft) {
   window.localStorage.setItem(`${FSSC_EDIT_STORAGE_PREFIX}${month}`, JSON.stringify(draft));
 }
 
+function loadInsightText(month: string): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(`${INSIGHT_STORAGE_PREFIX}${month}`) ?? "";
+}
+
+function persistInsightText(month: string, text: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(`${INSIGHT_STORAGE_PREFIX}${month}`, text);
+}
+
 export default function MonthlyIssuesPage() {
   const searchParams = useSearchParams();
   const [month, setMonth] = useState("");
@@ -103,6 +114,10 @@ export default function MonthlyIssuesPage() {
   const [editing, setEditing] = useState(false);
   const [editBuf, setEditBuf] = useState<[string, string, string]>(["", "", ""]);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [insightStored, setInsightStored] = useState("");
+  const [insightDraft, setInsightDraft] = useState("");
+  const [insightEditing, setInsightEditing] = useState(false);
+  const [insightSavedFlash, setInsightSavedFlash] = useState(false);
 
   useEffect(() => {
     const qm = (searchParams.get("month") ?? "").trim();
@@ -165,6 +180,29 @@ export default function MonthlyIssuesPage() {
     setEditing(false);
   }, [month, fssCaseRow?.receipt_number]);
 
+  useEffect(() => {
+    if (month.length < 7) return;
+    const t = loadInsightText(month);
+    setInsightStored(t);
+    setInsightDraft(t);
+    setInsightEditing(false);
+  }, [month]);
+
+  function handleInsightSave() {
+    if (month.length < 7) return;
+    persistInsightText(month, insightDraft);
+    setInsightStored(insightDraft);
+    setInsightEditing(false);
+    setInsightSavedFlash(true);
+    setTick((x) => x + 1);
+    window.setTimeout(() => setInsightSavedFlash(false), 2000);
+  }
+
+  function handleInsightCancel() {
+    setInsightDraft(insightStored);
+    setInsightEditing(false);
+  }
+
   if (!ready || month.length < 7) {
     return (
       <section className="space-y-6">
@@ -214,6 +252,56 @@ export default function MonthlyIssuesPage() {
             className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm"
           />
         </label>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <h4 className="text-sm font-bold text-slate-900">이달의 민원 인사이트</h4>
+          <div className="flex flex-wrap gap-2">
+            {!insightEditing ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setInsightDraft(insightStored);
+                  setInsightEditing(true);
+                }}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-800 shadow-sm hover:bg-slate-50"
+              >
+                수정
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={handleInsightCancel}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  onClick={handleInsightSave}
+                  className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-bold text-white shadow-lg hover:bg-slate-900"
+                >
+                  {insightSavedFlash ? "저장됨" : "저장"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+        {insightEditing ? (
+          <textarea
+            value={insightDraft}
+            onChange={(e) => setInsightDraft(e.target.value)}
+            rows={8}
+            placeholder="이번 달 민원 흐름·특이사항·보고용 메모 등을 자유롭게 입력하세요."
+            className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm leading-relaxed text-slate-800 placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100"
+          />
+        ) : (
+          <div className="mt-4 min-h-[5rem] rounded-xl border border-dashed border-slate-100 bg-slate-50/40 px-4 py-4 text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
+            {insightStored.trim() ? insightStored : "아직 작성된 내용이 없습니다. 「수정」을 눌러 입력할 수 있습니다."}
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
