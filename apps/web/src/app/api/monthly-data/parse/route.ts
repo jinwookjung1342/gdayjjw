@@ -40,6 +40,7 @@ type ParseResponse = {
   excel_columns: string[];
   date_column?: string | null;
   month_rollup?: Record<string, { total: number; external: number; internal: number }>;
+  month_age_rollup?: Record<string, Record<string, number>>;
 };
 
 type SupabaseInsertResponse<T> = T[] | { message?: string; error?: string };
