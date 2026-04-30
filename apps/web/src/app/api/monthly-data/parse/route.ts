@@ -96,8 +96,11 @@ function normalizeChannel(raw: unknown): "금융감독원" | "한국소비자보
 function normalizeBoolean(raw: unknown): boolean | null {
   const value = String(raw ?? "").trim();
   if (!value) return null;
-  if (["Y", "YES", "TRUE", "예", "해당", "1"].includes(value.toUpperCase())) return true;
-  if (["N", "NO", "FALSE", "아니오", "없음", "0"].includes(value.toUpperCase())) return false;
+  const upper = value.toUpperCase();
+  if (["Y", "YES", "TRUE", "예", "해당", "1", "O", "○", "재민원", "대상", "여"].includes(upper)) return true;
+  if (["N", "NO", "FALSE", "아니오", "없음", "0", "X", "×", "-", "비해당", "부", "무"].includes(upper)) return false;
+  if (/재민원\s*해당/u.test(value)) return true;
+  if (/재민원\s*비해당/u.test(value)) return false;
   return null;
 }
 

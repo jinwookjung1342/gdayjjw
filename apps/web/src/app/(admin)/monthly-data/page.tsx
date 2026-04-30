@@ -701,6 +701,17 @@ function excelText(excel: Record<string, unknown>, candidates: string[], fallbac
 }
 
 function extractRecomplaintFlag(excel: Record<string, unknown>): boolean {
+  const parse = (raw: unknown): boolean | null => {
+    const t = String(raw ?? "").trim();
+    if (!t) return null;
+    const u = t.toUpperCase();
+    if (["Y", "YES", "TRUE", "1", "예", "해당", "재민원", "O", "○", "대상", "여"].includes(u)) return true;
+    if (["N", "NO", "FALSE", "0", "아니오", "없음", "X", "×", "-", "비해당", "부", "무"].includes(u)) return false;
+    if (/재민원\s*해당/u.test(t)) return true;
+    if (/재민원\s*비해당/u.test(t)) return false;
+    return null;
+  };
+
   const direct = excelText(
     excel,
     [
@@ -713,15 +724,13 @@ function extractRecomplaintFlag(excel: Record<string, unknown>): boolean {
     ],
     ""
   );
-  const t0 = String(direct ?? "").trim().toUpperCase();
-  if (["Y", "YES", "TRUE", "1", "예", "해당", "재민원"].includes(t0)) return true;
-  if (["N", "NO", "FALSE", "0", "아니오", "없음"].includes(t0)) return false;
+  const d = parse(direct);
+  if (d !== null) return d;
   for (const [rawKey, rawVal] of Object.entries(excel)) {
     const k = normalizedHeaderKey(rawKey);
     if (!k.includes("재민원")) continue;
-    const t = String(rawVal ?? "").trim().toUpperCase();
-    if (["Y", "YES", "TRUE", "1", "예", "해당", "재민원"].includes(t)) return true;
-    if (["N", "NO", "FALSE", "0", "아니오", "없음"].includes(t)) return false;
+    const p = parse(rawVal);
+    if (p !== null) return p;
   }
   return false;
 }
