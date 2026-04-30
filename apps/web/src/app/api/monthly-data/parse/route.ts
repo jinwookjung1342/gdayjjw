@@ -320,8 +320,16 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
 }
 
 function normalizeDocAiBase(raw: string | undefined): string {
-  const trimmed = (raw ?? "").trim();
+  const trimmed = (raw ?? "").replace(/^\uFEFF/, "").trim();
   return trimmed || "http://localhost:8000";
+}
+
+/** DOC_AI_API_BASE_URL 이 호스트만 오거나, 실수로 전체 경로까지 적힌 경우 모두 처리 */
+function resolveDocAiParseUrl(base: string): string | null {
+  const b = base.trim().replace(/\/+$/, "");
+  if (!b) return null;
+  if (/\/parse\/monthly-data$/i.test(b)) return b;
+  return `${b}/parse/monthly-data`;
 }
 
 export async function POST(request: Request) {
@@ -348,15 +356,23 @@ export async function POST(request: Request) {
       );
     }
 
+    const parseUrlString = resolveDocAiParseUrl(docAiUrl);
+    if (!parseUrlString) {
+      return NextResponse.json(
+        { ok: false, message: "DOC_AI_API_BASE_URL이 비어 있습니다." },
+        { status: 500 }
+      );
+    }
+
     let docAiParsed: URL;
     try {
-      docAiParsed = new URL(`${docAiUrl.replace(/\/+$/, "")}/parse/monthly-data`);
+      docAiParsed = new URL(parseUrlString);
     } catch {
       return NextResponse.json(
         {
           ok: false,
           message:
-            "DOC_AI_API_BASE_URL이 올바른 URL이 아닙니다. 예: https://your-service.onrender.com (공백 없이, https 포함)"
+            "DOC_AI_API_BASE_URL이 올바른 URL이 아닙니다. 예: https://your-service.onrender.com (끝에 /parse 붙이지 말 것)"
         },
         { status: 500 }
       );
@@ -405,11 +421,13 @@ export async function POST(request: Request) {
     }
 
     if (!response.ok) {
+      const detail = String((data as { detail?: string }).detail ?? "문서 파싱 중 오류가 발생했습니다.");
+      const is404 = response.status === 404 || detail === "Not Found";
+      const hint = is404
+        ? ` (시도한 URL: ${docAiParsed.toString()} — Vercel의 DOC_AI_API_BASE_URL은 https://서비스.onrender.com 처럼 호스트만; /parse 를 붙이지 마세요.)`
+        : "";
       return NextResponse.json(
-        {
-          ok: false,
-          message: String((data as { detail?: string }).detail ?? "문서 파싱 중 오류가 발생했습니다.")
-        },
+        { ok: false, message: detail + hint },
         { status: response.status >= 400 && response.status < 600 ? response.status : 502 }
       );
     }
