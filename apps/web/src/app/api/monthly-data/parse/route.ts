@@ -114,6 +114,19 @@ const GENERIC_AI_PAIRS = [
   ["제도정책", "결제(수납)관련"]
 ] as const;
 
+const AI_CATEGORY_DB = new Set(["영업", "채권", "고객상담", "제도정책", "기타"]);
+
+function sanitizeAiCategoryForDb(category: string): "영업" | "채권" | "고객상담" | "제도정책" | "기타" {
+  const t = String(category ?? "").trim();
+  if (AI_CATEGORY_DB.has(t)) return t as "영업" | "채권" | "고객상담" | "제도정책" | "기타";
+  return "기타";
+}
+
+function truncStr(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return value.slice(0, max);
+}
+
 async function classifyComplaintWithAI(text: string, minorHint?: string): Promise<AiLabel> {
   const normalized = text.replace(/\s+/g, " ").trim();
   const hint = (minorHint ?? "").trim();
@@ -260,21 +273,21 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
       const complaintTypeMinor = excelText(excel, ["민원유형(소)", "민원유형소", "민원유형 소", "민원유형_소"], "");
       const complaintTypeMajor = excelText(excel, ["민원유형", "민원 유형"], "");
       return {
-        receipt_number: row.receipt_number,
+        receipt_number: String(row.receipt_number).trim(),
         receipt_date: toIsoDate(excel["접수일자"] ?? excel["접수일"]),
-        receipt_channel_name: channelName || "기타",
+        receipt_channel_name: truncStr(channelName || "기타", 100),
         complaint_channel: channel,
         complaint_scope: scope,
         birth_date: excel["생년월일"] ? toIsoDate(excel["생년월일"]) : null,
-        age_group: String(excel["연령대"] ?? "").trim() || null,
-        complaint_type_major: complaintTypeMajor,
-        complaint_type_minor: complaintTypeMinor,
-        business_unit_name: String(excel["업무"] ?? ""),
-        sales_department_name: String(excel["영업부서명"] ?? ""),
-        bond_department_name: String(excel["채권부서명"] ?? ""),
+        age_group: truncStr(String(excel["연령대"] ?? "").trim(), 40) || null,
+        complaint_type_major: truncStr(complaintTypeMajor, 100),
+        complaint_type_minor: truncStr(complaintTypeMinor, 100),
+        business_unit_name: truncStr(String(excel["업무"] ?? ""), 120),
+        sales_department_name: truncStr(String(excel["영업부서명"] ?? ""), 120),
+        bond_department_name: truncStr(String(excel["채권부서명"] ?? ""), 120),
         complaint_content: complaintContent,
-        ai_category: ai.category,
-        ai_subcategory: ai.subcategory,
+        ai_category: sanitizeAiCategoryForDb(ai.category),
+        ai_subcategory: truncStr(ai.subcategory, 100),
         complainant_summary: ws.complainant_summary ?? null,
         similar_case_content: ws.similar_case_content ?? null,
         company_opinion: ws.company_opinion ?? null,
@@ -294,20 +307,48 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
     };
   }
 
-  const complaintRes = await fetch(`${supabaseUrl}/rest/v1/complaint_records?on_conflict=receipt_number`, {
-    method: "POST",
-    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify(complaintRows)
-  });
-  const complaintJson = (await complaintRes.json()) as SupabaseInsertResponse<{ id: string }>;
-  if (!complaintRes.ok || !Array.isArray(complaintJson)) {
-    throw new Error("민원 데이터 저장에 실패했습니다.");
+  const tooLongReceipt = complaintRows.find((r) => r.receipt_number.length > 32);
+  if (tooLongReceipt) {
+    throw new Error(
+      `접수번호가 DB 허용 길이(32자)를 초과했습니다: "${tooLongReceipt.receipt_number.slice(0, 48)}…" (${tooLongReceipt.receipt_number.length}자). 필요하면 Supabase에서 receipt_number 컬럼 길이를 늘리세요.`
+    );
+  }
+
+  /** PostgREST 대량 단일 요청 한도 피함 + 오류 메시지에 code/message 포함 */
+  const chunkSize = 200;
+  let persistedCount = 0;
+  for (let offset = 0; offset < complaintRows.length; offset += chunkSize) {
+    const chunk = complaintRows.slice(offset, offset + chunkSize);
+    const complaintRes = await fetch(`${supabaseUrl}/rest/v1/complaint_records?on_conflict=receipt_number`, {
+      method: "POST",
+      headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify(chunk)
+    });
+    const rawText = await complaintRes.text();
+    let complaintParsed: unknown;
+    try {
+      complaintParsed = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      throw new Error(
+        `민원 데이터 저장 응답 파싱 실패 (행 ${offset + 1}~${offset + chunk.length}): ${rawText.slice(0, 500)}`
+      );
+    }
+    if (!complaintRes.ok || !Array.isArray(complaintParsed)) {
+      const supaDetail =
+        complaintParsed !== null &&
+        typeof complaintParsed === "object" &&
+        ("message" in complaintParsed || "hint" in complaintParsed || "details" in complaintParsed)
+          ? JSON.stringify(complaintParsed)
+          : rawText.slice(0, 1200);
+      throw new Error(`민원 데이터 저장에 실패했습니다 (행 ${offset + 1}~${offset + chunk.length} 묶음). ${supaDetail}`);
+    }
+    persistedCount += complaintParsed.length;
   }
 
   return {
     persisted: true,
-    persisted_count: complaintJson.length,
-    message: `${complaintJson.length}건 DB 저장 완료`,
+    persisted_count: persistedCount,
+    message: `${persistedCount}건 DB 저장 완료`,
     ai_labels_by_receipt: aiLabelsByReceipt
   };
   } catch (error) {
