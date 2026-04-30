@@ -198,6 +198,10 @@ export default function StatisticsPage() {
         <div>
           <h3 className="text-2xl font-bold text-slate-950">민원통계</h3>
           <p className="mt-1 text-sm text-slate-500">월별 민원 발생 현황과 대외·대내 민원 분석</p>
+          <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-slate-400">
+            기본 표시 월은 <span className="font-semibold text-slate-600">달력상 전달</span>입니다(예: 4월이면 3월 데이터). 업로드한 엑셀 접수월과
+            맞지 않으면 건수·차트가 0처럼 보일 수 있으니 연도·월을 바꿔 보세요.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 md:justify-end">
           {isLocalMode ? (

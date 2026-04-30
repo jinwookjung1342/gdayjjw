@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
   const params = new URLSearchParams();
   params.set(
     "select",
-    "id,receipt_number,receipt_date,complaint_scope,receipt_channel_name,business_unit_name,sales_department_name,bond_department_name,complaint_content,birth_date,age_group,ai_category,ai_subcategory,complaint_type_minor,complaint_type_major,created_at"
+    "id,receipt_number,receipt_date,complaint_scope,receipt_channel_name,business_unit_name,sales_department_name,bond_department_name,complaint_content,birth_date,age_group,ai_category,ai_subcategory,complaint_type_minor,complaint_type_major,created_at,complainant_summary,similar_case_content,company_opinion,violation_and_action,future_action_plan,is_third_party"
   );
   params.set("order", "receipt_date.desc");
   params.set("limit", String(DEFAULT_LIMIT));

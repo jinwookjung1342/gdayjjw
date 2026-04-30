@@ -214,6 +214,7 @@ export default function MonthlyDataPage() {
       const merged = mergeApiRowsWithLocal(body.rows ?? []);
       setRecords(filterLocalRecords(merged, fromDate, toDate, keyword));
       setIsLocalMode(false);
+      setError("");
       setFetchingRecords(false);
     } catch {
       const filteredLocal = filterLocalRecords(readLocalRecords(), fromDate, toDate, keyword);
@@ -523,6 +524,17 @@ export default function MonthlyDataPage() {
           </div>
         </div>
 
+        {!isLocalMode && !fetchingRecords && records.length === 0 ? (
+          <p className="rounded-lg border border-amber-100 bg-amber-50/70 px-3 py-3 text-[11px] leading-relaxed text-amber-900">
+            서버(DB)에는 아직 저장된 민원 행이 없거나, 검색 조건에 맞는 행이 없습니다. Supabase 대시보드의{" "}
+            <span className="font-semibold">complaint_records</span> 테이블에 행이 있는지 확인하세요. 여기가 0이면
+            월별 업로드가 <span className="font-semibold">다른 Supabase 프로젝트</span>(또는 로컬 .env)로 들어갔을 수
+            있습니다. Vercel 프로젝트 → Settings → Environment Variables의{" "}
+            <span className="font-mono">NEXT_PUBLIC_SUPABASE_URL</span>·
+            <span className="font-mono">SUPABASE_SERVICE_ROLE_KEY</span>가 그 프로젝트와 짝이 맞는지 봐 주세요.
+          </p>
+        ) : null}
+
         <div className="overflow-x-auto rounded-lg border border-slate-200">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-slate-50 text-slate-600">
@@ -633,7 +645,11 @@ export default function MonthlyDataPage() {
               {records.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-3 py-8 text-center text-sm text-slate-500">
-                    {fetchingRecords ? "조회 중..." : "저장된 데이터가 없습니다."}
+                    {fetchingRecords
+                      ? "조회 중..."
+                      : isLocalMode
+                        ? "저장된 데이터가 없습니다. (로컬 모드: 이 브라우저에만 쌓인 데이터만 조회)"
+                        : "조회 결과가 없습니다."}
                   </td>
                 </tr>
               ) : null}

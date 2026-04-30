@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { normalizeReceiptDate } from "@/lib/receipt-date";
-import { aggregateComplaintKeywords } from "@/lib/issue-keywords";
+import { aggregateComplaintKeywords, buildWordCombinedText } from "@/lib/issue-keywords";
 import { useSearchParams } from "next/navigation";
 import {
   FSS_REPLY_SECTION_LABELS,
@@ -14,7 +14,6 @@ import {
 
 const LOCAL_RECORDS_KEY = "jb_monthly_data_records";
 const FSSC_EDIT_STORAGE_PREFIX = "jb_monthly_issues_fssc_edit_";
-const INSIGHT_STORAGE_PREFIX = "jb_monthly_issues_insight_";
 
 type IssueRow = {
   receipt_number?: string;
@@ -47,6 +46,62 @@ function defaultReportMonth(): string {
 
 function normScope(s: string | undefined): string {
   return (s ?? "").trim();
+}
+
+/** YYYY-MM → 해당 월 1일~말일 (로컬 달력) */
+function calendarMonthBounds(month: string): { from: string; to: string } | null {
+  if (!/^\d{4}-\d{2}$/.test(month)) return null;
+  const [y, m] = month.split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return null;
+  const last = new Date(y, m, 0).getDate();
+  return {
+    from: `${month}-01`,
+    to: `${month}-${String(last).padStart(2, "0")}`
+  };
+}
+
+function complaintApiJsonToIssueRow(raw: Record<string, unknown>): IssueRow | null {
+  const receipt_number = String(raw.receipt_number ?? "").trim();
+  if (!receipt_number) return null;
+  const ws: Record<string, string> = {};
+  const add = (k: string, v: unknown) => {
+    const t = String(v ?? "").trim();
+    if (t) ws[k] = t;
+  };
+  add("complainant_summary", raw.complainant_summary);
+  add("similar_case_content", raw.similar_case_content);
+  add("company_opinion", raw.company_opinion);
+  add("violation_and_action", raw.violation_and_action);
+  add("future_action_plan", raw.future_action_plan);
+  const word_sections = Object.keys(ws).length ? ws : undefined;
+  return {
+    receipt_number,
+    receipt_date: String(raw.receipt_date ?? "").trim(),
+    complaint_scope: String(raw.complaint_scope ?? "").trim() || "대내",
+    receipt_channel_name: String(raw.receipt_channel_name ?? "").trim(),
+    complaint_content: String(raw.complaint_content ?? "").trim(),
+    word_combined_text: buildWordCombinedText(ws),
+    word_sections: word_sections ?? null,
+    ai_category: typeof raw.ai_category === "string" ? raw.ai_category : null,
+    ai_subcategory: typeof raw.ai_subcategory === "string" ? raw.ai_subcategory : null,
+    complaint_type_minor: typeof raw.complaint_type_minor === "string" ? raw.complaint_type_minor : null,
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined
+  };
+}
+
+function mergeDbAndLocalIssues(month: string, fromDb: IssueRow[], locals: IssueRow[]): IssueRow[] {
+  const inMonthDb = fromDb.filter((r) => rowInMonth(r, month));
+  const inMonthLoc = locals.filter((r) => rowInMonth(r, month));
+  const byRn = new Map<string, IssueRow>();
+  for (const r of inMonthDb) {
+    const k = (r.receipt_number ?? "").trim();
+    if (k) byRn.set(k, r);
+  }
+  for (const r of inMonthLoc) {
+    const k = (r.receipt_number ?? "").trim();
+    if (k && !byRn.has(k)) byRn.set(k, r);
+  }
+  return Array.from(byRn.values());
 }
 
 function rowInMonth(row: IssueRow, month: string): boolean {
@@ -96,16 +151,6 @@ function saveFsscDraft(month: string, draft: FsscEditDraft) {
   window.localStorage.setItem(`${FSSC_EDIT_STORAGE_PREFIX}${month}`, JSON.stringify(draft));
 }
 
-function loadInsightText(month: string): string {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(`${INSIGHT_STORAGE_PREFIX}${month}`) ?? "";
-}
-
-function persistInsightText(month: string, text: string) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(`${INSIGHT_STORAGE_PREFIX}${month}`, text);
-}
-
 export default function MonthlyIssuesPage() {
   const searchParams = useSearchParams();
   const [month, setMonth] = useState("");
@@ -118,6 +163,11 @@ export default function MonthlyIssuesPage() {
   const [insightDraft, setInsightDraft] = useState("");
   const [insightEditing, setInsightEditing] = useState(false);
   const [insightSavedFlash, setInsightSavedFlash] = useState(false);
+  const [insightSaving, setInsightSaving] = useState(false);
+  const [insightError, setInsightError] = useState("");
+  const [dbRows, setDbRows] = useState<IssueRow[]>([]);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [dbError, setDbError] = useState("");
 
   useEffect(() => {
     const qm = (searchParams.get("month") ?? "").trim();
@@ -131,6 +181,42 @@ export default function MonthlyIssuesPage() {
   }, [searchParams]);
 
   useEffect(() => {
+    if (!ready || month.length < 7) return;
+    const bounds = calendarMonthBounds(month);
+    if (!bounds) return;
+    let cancelled = false;
+    setDbLoading(true);
+    setDbError("");
+    const q = new URLSearchParams({ from: bounds.from, to: bounds.to });
+    void fetch(`/api/monthly-data/records?${q.toString()}`)
+      .then(async (res) => {
+        const body = (await res.json()) as { ok?: boolean; rows?: unknown[]; message?: string };
+        if (cancelled) return;
+        if (!res.ok || !body.ok || !Array.isArray(body.rows)) {
+          setDbError(typeof body.message === "string" ? body.message : "DB 조회에 실패했습니다.");
+          setDbRows([]);
+          return;
+        }
+        const mapped = body.rows
+          .map((row) => complaintApiJsonToIssueRow(row as Record<string, unknown>))
+          .filter((r): r is IssueRow => r !== null);
+        setDbRows(mapped);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDbError("네트워크 오류로 저장소 데이터를 불러오지 못했습니다.");
+          setDbRows([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDbLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [month, ready]);
+
+  useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === LOCAL_RECORDS_KEY) setTick((t) => t + 1);
     };
@@ -138,17 +224,21 @@ export default function MonthlyIssuesPage() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const externalRows = useMemo(() => {
+  const rowsForMonth = useMemo(() => {
     if (month.length < 7) return [];
-    return readLocalRows().filter((row) => rowInMonth(row, month) && normScope(row.complaint_scope) === "대외");
-  }, [month, ready, tick]);
+    return mergeDbAndLocalIssues(month, dbRows, readLocalRows());
+  }, [month, dbRows, tick]);
+
+  const externalRows = useMemo(() => {
+    return rowsForMonth.filter((row) => normScope(row.complaint_scope) === "대외");
+  }, [rowsForMonth]);
 
   const keywords = useMemo(() => aggregateComplaintKeywords(externalRows).slice(0, 10), [externalRows]);
 
   const fssCaseRow = useMemo(() => {
     if (month.length < 7) return null;
-    return pickFirstFsscSubstantiveCase(readLocalRows(), month, rowInMonth);
-  }, [month, ready, tick]);
+    return pickFirstFsscSubstantiveCase(rowsForMonth, month, rowInMonth);
+  }, [month, rowsForMonth]);
 
   const autoTriple = useMemo(() => {
     if (!fssCaseRow) return ["", "", ""] as [string, string, string];
@@ -172,9 +262,9 @@ export default function MonthlyIssuesPage() {
 
   const hasWordSectionsInStore = useMemo(() => {
     if (month.length < 7) return false;
-    const rows = readLocalRows().filter((r) => rowInMonth(r, month) && normScope(r.complaint_scope) === "대외");
+    const rows = rowsForMonth.filter((r) => rowInMonth(r, month) && normScope(r.complaint_scope) === "대외");
     return rows.some((r) => Object.keys(parseWordSectionsFlexible(r.word_sections)).length > 0);
-  }, [month, ready, tick]);
+  }, [month, rowsForMonth]);
 
   useEffect(() => {
     setEditing(false);
@@ -182,19 +272,59 @@ export default function MonthlyIssuesPage() {
 
   useEffect(() => {
     if (month.length < 7) return;
-    const t = loadInsightText(month);
-    setInsightStored(t);
-    setInsightDraft(t);
+    let cancelled = false;
+    setInsightError("");
+    void fetch(`/api/monthly-issues/insight?month=${encodeURIComponent(month)}`)
+      .then(async (res) => {
+        const body = (await res.json()) as { ok?: boolean; text?: string; message?: string };
+        if (cancelled) return;
+        if (!res.ok || !body.ok) {
+          setInsightError(typeof body.message === "string" ? body.message : "인사이트 조회에 실패했습니다.");
+          setInsightStored("");
+          setInsightDraft("");
+          return;
+        }
+        const t = typeof body.text === "string" ? body.text : "";
+        setInsightStored(t);
+        setInsightDraft(t);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setInsightError("인사이트 조회 중 네트워크 오류가 발생했습니다.");
+        setInsightStored("");
+        setInsightDraft("");
+      });
     setInsightEditing(false);
+    return () => {
+      cancelled = true;
+    };
   }, [month]);
 
-  function handleInsightSave() {
+  async function handleInsightSave() {
     if (month.length < 7) return;
-    persistInsightText(month, insightDraft);
-    setInsightStored(insightDraft);
+    setInsightSaving(true);
+    setInsightError("");
+    try {
+      const res = await fetch("/api/monthly-issues/insight", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month, text: insightDraft })
+      });
+      const body = (await res.json()) as { ok?: boolean; text?: string; message?: string };
+      if (!res.ok || !body.ok) {
+        setInsightError(typeof body.message === "string" ? body.message : "인사이트 저장에 실패했습니다.");
+        setInsightSaving(false);
+        return;
+      }
+      setInsightStored(typeof body.text === "string" ? body.text : insightDraft);
+      setInsightSaving(false);
+    } catch {
+      setInsightError("인사이트 저장 중 네트워크 오류가 발생했습니다.");
+      setInsightSaving(false);
+      return;
+    }
     setInsightEditing(false);
     setInsightSavedFlash(true);
-    setTick((x) => x + 1);
     window.setTimeout(() => setInsightSavedFlash(false), 2000);
   }
 
@@ -242,7 +372,14 @@ export default function MonthlyIssuesPage() {
   return (
     <section className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <h3 className="text-2xl font-bold text-slate-950">이달의 민원</h3>
+        <div>
+          <h3 className="text-2xl font-bold text-slate-950">이달의 민원</h3>
+          <p className="mt-1 max-w-xl text-xs leading-relaxed text-slate-500">
+            키워드·회신 사례·인사이트 메모를 Supabase 기준으로 월별 조회/저장합니다.
+          </p>
+          {dbError ? <p className="mt-2 text-xs text-amber-700">{dbError}</p> : null}
+          {insightError ? <p className="mt-1 text-xs text-amber-700">{insightError}</p> : null}
+        </div>
         <label className="flex flex-col text-xs font-medium text-slate-600">
           <span className="mb-1">기준 월</span>
           <input
@@ -273,17 +410,19 @@ export default function MonthlyIssuesPage() {
               <>
                 <button
                   type="button"
+                  disabled={insightSaving}
                   onClick={handleInsightCancel}
-                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50"
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   취소
                 </button>
                 <button
                   type="button"
+                  disabled={insightSaving}
                   onClick={handleInsightSave}
-                  className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-bold text-white shadow-lg hover:bg-slate-900"
+                  className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-bold text-white shadow-lg hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {insightSavedFlash ? "저장됨" : "저장"}
+                  {insightSaving ? "저장 중..." : insightSavedFlash ? "저장됨" : "저장"}
                 </button>
               </>
             )}
@@ -307,9 +446,12 @@ export default function MonthlyIssuesPage() {
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
         <h4 className="text-sm font-bold text-slate-900">민원내용 키워드 (빈도)</h4>
 
-        {keywords.length === 0 ? (
+        {dbLoading ? (
+          <p className="mt-6 text-sm text-slate-500">저장소(DB)에서 해당 월 민원을 불러오는 중입니다…</p>
+        ) : keywords.length === 0 ? (
           <p className="mt-6 text-sm text-slate-500">
-            해당 월 대외민원이 없거나 키워드를 추출할 수 없습니다.「월별 데이터 입력」에서 엑셀(+ Word) 업로드를 한 뒤 다시 확인하세요.
+            해당 월 대외민원이 없거나 키워드를 추출할 수 없습니다. 위에서 기준 월을 접수 데이터가 있는 달로 바꾸거나, 「월별 데이터 입력」에서
+            업로드·저장이 됐는지 확인하세요.
           </p>
         ) : (
           <>
@@ -375,9 +517,11 @@ export default function MonthlyIssuesPage() {
 
         {!fssCaseRow ? (
           <div className="mt-5 rounded-xl border border-amber-100 bg-amber-50/60 px-4 py-4 text-sm text-amber-900">
-            {!hasWordSectionsInStore
-              ? "Word 회신서에서 추출한 섹션이 아직 저장되지 않았습니다.「월별 데이터 입력」에서 엑셀과 Word를 함께 파싱·저장한 뒤, 이 페이지를 새로 고침하세요."
-              : '조건을 만족하는 사례가 없습니다. (금융감독원·한국소비자원 접수건 중 Word 매핑, 그리고 "민원의 주장 요지" 등 3단락이 모두 해당사항 없음이 아닌 건 필요)'}
+            {dbLoading
+              ? "저장소에서 데이터를 불러오는 중입니다."
+              : !hasWordSectionsInStore
+              ? 'Word 회신서에서 추출한 본문(민원의 주장 요지 등)이 DB에 없습니다. 같은 달 폴더에서 워드까지 포함해 「월별 데이터 입력」 업로드를 한 뒤 다시 확인하세요.'
+              : '조건을 만족하는 사례가 없습니다. (금융감독원·한국소비자원 접수건 중 3단락이 모두 "해당사항 없음"이 아니어야 합니다.)'}
           </div>
         ) : (
           <div className="mt-5 space-y-4">
