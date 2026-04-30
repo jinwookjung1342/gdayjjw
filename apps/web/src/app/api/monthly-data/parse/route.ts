@@ -127,6 +127,15 @@ function truncStr(value: string, max: number): string {
   return value.slice(0, max);
 }
 
+function dedupeByReceiptNumber<T extends { receipt_number: string }>(rows: T[]): { rows: T[]; dropped: number } {
+  const byReceipt = new Map<string, T>();
+  for (const row of rows) {
+    // 동일 접수번호가 여러 번 들어오면 마지막 행으로 정규화(Upsert 1회 보장)
+    byReceipt.set(row.receipt_number, row);
+  }
+  return { rows: Array.from(byReceipt.values()), dropped: rows.length - byReceipt.size };
+}
+
 async function classifyComplaintWithAI(text: string, minorHint?: string): Promise<AiLabel> {
   const normalized = text.replace(/\s+/g, " ").trim();
   const hint = (minorHint ?? "").trim();
@@ -307,7 +316,10 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
     };
   }
 
-  const tooLongReceipt = complaintRows.find((r) => r.receipt_number.length > 32);
+  const deduped = dedupeByReceiptNumber(complaintRows);
+  const rowsToSave = deduped.rows;
+
+  const tooLongReceipt = rowsToSave.find((r) => r.receipt_number.length > 32);
   if (tooLongReceipt) {
     throw new Error(
       `접수번호가 DB 허용 길이(32자)를 초과했습니다: "${tooLongReceipt.receipt_number.slice(0, 48)}…" (${tooLongReceipt.receipt_number.length}자). 필요하면 Supabase에서 receipt_number 컬럼 길이를 늘리세요.`
@@ -317,8 +329,8 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
   /** PostgREST 대량 단일 요청 한도 피함 + 오류 메시지에 code/message 포함 */
   const chunkSize = 200;
   let persistedCount = 0;
-  for (let offset = 0; offset < complaintRows.length; offset += chunkSize) {
-    const chunk = complaintRows.slice(offset, offset + chunkSize);
+  for (let offset = 0; offset < rowsToSave.length; offset += chunkSize) {
+    const chunk = rowsToSave.slice(offset, offset + chunkSize);
     const complaintRes = await fetch(`${supabaseUrl}/rest/v1/complaint_records?on_conflict=receipt_number`, {
       method: "POST",
       headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
@@ -348,7 +360,10 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
   return {
     persisted: true,
     persisted_count: persistedCount,
-    message: `${persistedCount}건 DB 저장 완료`,
+    message:
+      deduped.dropped > 0
+        ? `${persistedCount}건 DB 저장 완료 (중복 접수번호 ${deduped.dropped}건은 마지막 행 기준으로 정규화)`
+        : `${persistedCount}건 DB 저장 완료`,
     ai_labels_by_receipt: aiLabelsByReceipt
   };
   } catch (error) {
