@@ -18,6 +18,12 @@ type RecordRow = {
   bond_department_name?: string | null;
 };
 
+type MonthRollupEntry = { total: number; external: number; internal: number };
+type ParsedResultRollup = {
+  month_rollup?: Record<string, MonthRollupEntry>;
+  month_age_rollup?: Record<string, Record<string, number>>;
+};
+
 function getSupabaseConfig() {
   const supabaseUrl = normalizeSupabaseOrigin(process.env.NEXT_PUBLIC_SUPABASE_URL);
   const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
@@ -55,6 +61,40 @@ function groupCount(rows: RecordRow[], keySelector: (row: RecordRow) => string) 
     .sort((a, b) => b.count - a.count);
 }
 
+function isNum(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function parseMonthRollup(raw: unknown): ParsedResultRollup {
+  if (!raw || typeof raw !== "object") return {};
+  const o = raw as Record<string, unknown>;
+  const month_rollup_raw = o.month_rollup;
+  const month_age_rollup_raw = o.month_age_rollup;
+  const month_rollup: Record<string, MonthRollupEntry> = {};
+  const month_age_rollup: Record<string, Record<string, number>> = {};
+
+  if (month_rollup_raw && typeof month_rollup_raw === "object") {
+    for (const [k, v] of Object.entries(month_rollup_raw as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const r = v as Record<string, unknown>;
+      if (isNum(r.total) && isNum(r.external) && isNum(r.internal)) {
+        month_rollup[k] = { total: r.total, external: r.external, internal: r.internal };
+      }
+    }
+  }
+  if (month_age_rollup_raw && typeof month_age_rollup_raw === "object") {
+    for (const [k, v] of Object.entries(month_age_rollup_raw as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const one: Record<string, number> = {};
+      for (const [g, n] of Object.entries(v as Record<string, unknown>)) {
+        if (isNum(n)) one[g] = n;
+      }
+      if (Object.keys(one).length > 0) month_age_rollup[k] = one;
+    }
+  }
+  return { month_rollup, month_age_rollup };
+}
+
 export async function GET(request: NextRequest) {
   const month =
     request.nextUrl.searchParams.get("month") ??
@@ -84,7 +124,13 @@ export async function GET(request: NextRequest) {
   prevParams.append("receipt_date", `lt.${prevRange.toExclusive}`);
   prevParams.set("limit", "5000");
 
-  const [currentRes, prevRes] = await Promise.all([
+  const rollupParams = new URLSearchParams();
+  rollupParams.set("select", "parsed_result");
+  rollupParams.set("file_type", "eq.excel");
+  rollupParams.set("order", "created_at.desc");
+  rollupParams.set("limit", "8");
+
+  const [currentRes, prevRes, rollupRes] = await Promise.all([
     fetch(`${config.supabaseUrl}/rest/v1/complaint_records?${currentParams.toString()}`, {
       method: "GET",
       headers: supabaseHeaders(config.serviceRoleKey)
@@ -92,28 +138,56 @@ export async function GET(request: NextRequest) {
     fetch(`${config.supabaseUrl}/rest/v1/complaint_records?${prevParams.toString()}`, {
       method: "GET",
       headers: supabaseHeaders(config.serviceRoleKey)
+    }),
+    fetch(`${config.supabaseUrl}/rest/v1/source_files?${rollupParams.toString()}`, {
+      method: "GET",
+      headers: supabaseHeaders(config.serviceRoleKey)
     })
   ]);
 
   const currentRows = (await currentRes.json()) as unknown;
   const prevRows = (await prevRes.json()) as unknown;
+  const rollupRows = (await rollupRes.json()) as unknown;
   if (!currentRes.ok || !prevRes.ok) {
     return NextResponse.json({ ok: false, message: "통계 데이터 조회에 실패했습니다." }, { status: 500 });
   }
 
   const rows = (Array.isArray(currentRows) ? currentRows : []) as RecordRow[];
-  const prevTotal = Array.isArray(prevRows) ? prevRows.length : 0;
+  const prevTotalFromDb = Array.isArray(prevRows) ? prevRows.length : 0;
+
+  let latestRollup: ParsedResultRollup = {};
+  if (rollupRes.ok && Array.isArray(rollupRows)) {
+    for (const row of rollupRows as Array<{ parsed_result?: unknown }>) {
+      const parsed = parseMonthRollup(row.parsed_result);
+      if (Object.keys(parsed.month_rollup ?? {}).length > 0 || Object.keys(parsed.month_age_rollup ?? {}).length > 0) {
+        latestRollup = parsed;
+        break;
+      }
+    }
+  }
 
   const normScope = (s: string | undefined) => (s ?? "").trim();
-  const total = rows.length;
-  const external = rows.filter((row) => normScope(row.complaint_scope) === "대외").length;
-  const internal = rows.filter((row) => normScope(row.complaint_scope) === "대내").length;
+  const totalFromDb = rows.length;
+  const externalFromDb = rows.filter((row) => normScope(row.complaint_scope) === "대외").length;
+  const internalFromDb = rows.filter((row) => normScope(row.complaint_scope) === "대내").length;
+  const currentRoll = latestRollup.month_rollup?.[month];
+  const prevRoll = latestRollup.month_rollup?.[prevMonth];
+  const total = currentRoll?.total ?? totalFromDb;
+  const external = currentRoll?.external ?? externalFromDb;
+  const internal = currentRoll?.internal ?? internalFromDb;
+  const prevTotal = prevRoll?.total ?? prevTotalFromDb;
   const diffRate = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : 0;
 
-  const ageGroups = groupCount(rows, (row) => {
-    const g = (row.age_group ?? "").trim();
-    return g || "미상";
-  });
+  const ageFromRollup = latestRollup.month_age_rollup?.[month];
+  const ageGroups =
+    ageFromRollup && Object.keys(ageFromRollup).length > 0
+      ? Object.entries(ageFromRollup)
+          .map(([label, count]) => ({ label, count }))
+          .sort((a, b) => b.count - a.count)
+      : groupCount(rows, (row) => {
+          const g = (row.age_group ?? "").trim();
+          return g || "미상";
+        });
 
   const externalRows = rows.filter((row) => normScope(row.complaint_scope) === "대외");
   const businessMinor = groupCount(externalRows, (row) => row.complaint_type_minor ?? "미분류");

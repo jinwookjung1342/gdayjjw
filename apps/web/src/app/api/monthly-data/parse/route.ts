@@ -253,7 +253,11 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
       file_name: excelFileName,
       storage_path: `local/${excelFileName}`,
       parsed_status: "parsed",
-      parsed_result: { rows: parseData.excel_total }
+      parsed_result: {
+        rows: parseData.excel_total,
+        month_rollup: parseData.month_rollup ?? {},
+        month_age_rollup: parseData.month_age_rollup ?? {}
+      }
     },
     ...wordFileNames.map((name) => ({
       upload_batch_id: uploadBatchId,
