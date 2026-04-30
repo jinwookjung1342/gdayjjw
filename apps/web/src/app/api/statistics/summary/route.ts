@@ -193,10 +193,12 @@ export async function GET(request: NextRequest) {
         });
 
   const externalRows = rows.filter((row) => normScope(row.complaint_scope) === "대외");
+  const externalSalesRows = externalRows.filter((row) => (row.complaint_type_minor ?? "").trim() === "영업");
+  const externalBondRows = externalRows.filter((row) => (row.complaint_type_minor ?? "").trim() === "채권");
   const businessMinor = groupCount(externalRows, (row) => row.complaint_type_minor ?? "미분류");
   const productMajor = groupCount(externalRows, (row) => row.complaint_type_major ?? "미분류");
-  const salesDept = groupCount(externalRows, (row) => row.sales_department_name ?? "미지정");
-  const bondDept = groupCount(externalRows, (row) => row.bond_department_name ?? "미지정");
+  const salesDept = groupCount(externalSalesRows, (row) => row.sales_department_name ?? "미지정");
+  const bondDept = groupCount(externalBondRows, (row) => row.bond_department_name ?? "미지정");
   const complaintTypes = groupCount(externalRows, (row) => {
     const sub = (row.ai_subcategory ?? "").trim();
     const cat = (row.ai_category ?? "").trim();
