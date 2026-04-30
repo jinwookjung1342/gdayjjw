@@ -48,3 +48,4 @@ git config --global user.email "GitHub에 등록한 이메일"
 1. **파싱 시 Not Found** → Vercel `DOC_AI_API_BASE_URL` 이 호스트만인지 확인 후 Redeploy.  
 2. **Render 빌드 실패** → Events에서 로그 확인, `services/doc-ai`에 Dockerfile·`app` 폴더 있는지 확인.  
 3. **첫 API 요청만 느림** → Render 무료 인스턴스 슬립; `/health` 한 번 열고 잠시 후 다시 시도.
+테스트 배포 트리거 (삭제 가능)
