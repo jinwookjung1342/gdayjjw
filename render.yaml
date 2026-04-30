@@ -1,0 +1,16 @@
+# Render Blueprint / 문서화용: doc-ai(FastAPI)는 이 모노레포의 services/doc-ai 에 있습니다.
+# 기존 웹 서비스만 쓰는 경우 대시보드에서 Root Directory 만 맞춰도 동일 효과입니다.
+# https://render.com/docs/monorepo-support
+services:
+  - type: web
+    name: gdayjjw
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: services/doc-ai
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"

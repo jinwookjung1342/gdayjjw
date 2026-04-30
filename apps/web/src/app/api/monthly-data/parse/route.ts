@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+
+/** Vercel 등에서 doc-ai 호출이 길어질 때 기본 10초 제한을 피하기 위함(플랜별 상한 있음). */
+export const maxDuration = 60;
 import { normalizeReceiptDate } from "@/lib/receipt-date";
 import {
   aiLabelFromMinorStrict,
@@ -316,64 +319,120 @@ async function persistToSupabase(parseData: ParseResponse, excelFileName: string
   }
 }
 
+function normalizeDocAiBase(raw: string | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  return trimmed || "http://localhost:8000";
+}
+
 export async function POST(request: Request) {
-  const form = await request.formData();
-  const excelFile = form.get("excelFile");
-  const wordFiles = form.getAll("wordFiles");
+  try {
+    const form = await request.formData();
+    const excelFile = form.get("excelFile");
+    const wordFiles = form.getAll("wordFiles");
 
-  if (!(excelFile instanceof File)) {
-    return NextResponse.json({ ok: false, message: "Excel 파일이 필요합니다." }, { status: 400 });
-  }
+    if (!(excelFile instanceof File)) {
+      return NextResponse.json({ ok: false, message: "Excel 파일이 필요합니다." }, { status: 400 });
+    }
 
-  const docAiUrl = process.env.DOC_AI_API_BASE_URL ?? "http://localhost:8000";
-  const isProd = process.env.NODE_ENV === "production";
-  const isLocalDocAi = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(docAiUrl);
-  if (isProd && isLocalDocAi) {
+    const docAiUrl = normalizeDocAiBase(process.env.DOC_AI_API_BASE_URL);
+    const isProd = process.env.NODE_ENV === "production";
+    const isLocalDocAi = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(docAiUrl);
+    if (isProd && isLocalDocAi) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message:
+            "DOC_AI_API_BASE_URL이 로컬(localhost)로 설정되어 있습니다. 배포 환경에서는 외부 접근 가능한 doc-ai URL(예: Render)을 설정해야 합니다."
+        },
+        { status: 500 }
+      );
+    }
+
+    let docAiParsed: URL;
+    try {
+      docAiParsed = new URL(`${docAiUrl.replace(/\/+$/, "")}/parse/monthly-data`);
+    } catch {
+      return NextResponse.json(
+        {
+          ok: false,
+          message:
+            "DOC_AI_API_BASE_URL이 올바른 URL이 아닙니다. 예: https://your-service.onrender.com (공백 없이, https 포함)"
+        },
+        { status: 500 }
+      );
+    }
+    if (!/^https?:$/i.test(docAiParsed.protocol)) {
+      return NextResponse.json(
+        { ok: false, message: "DOC_AI_API_BASE_URL은 http 또는 https 로 시작해야 합니다." },
+        { status: 500 }
+      );
+    }
+
+    const forwardForm = new FormData();
+    forwardForm.append("excel_file", excelFile, excelFile.name);
+    wordFiles.forEach((file) => {
+      if (file instanceof File) {
+        forwardForm.append("word_files", file, file.name);
+      }
+    });
+
+    const response = await fetch(docAiParsed.toString(), {
+      method: "POST",
+      body: forwardForm
+    });
+
+    const rawBody = await response.text();
+    let data: ParseResponse | { detail?: string };
+    try {
+      data = rawBody ? (JSON.parse(rawBody) as ParseResponse | { detail?: string }) : { detail: "빈 응답" };
+    } catch {
+      const snippet = rawBody.slice(0, 280).replace(/\s+/g, " ");
+      return NextResponse.json(
+        {
+          ok: false,
+          message: docAiUpstreamLooksHtml(snippet)
+            ? "doc-ai가 HTML을 반환했습니다(Render 슬립/502·잘못된 URL·경로). DOC_AI_API_BASE_URL과 Render 로그를 확인하세요."
+            : `doc-ai 응답이 JSON이 아닙니다. (${snippet.slice(0, 120)}…)`,
+          excel_total: 0,
+          word_total: 0,
+          matched_total: 0,
+          unmatched_word_files: [],
+          preview_rows: [],
+          excel_columns: []
+        },
+        { status: 502 }
+      );
+    }
+
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: String((data as { detail?: string }).detail ?? "문서 파싱 중 오류가 발생했습니다.")
+        },
+        { status: response.status >= 400 && response.status < 600 ? response.status : 502 }
+      );
+    }
+
+    const parseData = data as ParseResponse;
+    const persistResult = await persistToSupabase(
+      parseData,
+      excelFile.name,
+      wordFiles.filter((file): file is File => file instanceof File).map((file) => file.name)
+    );
+    return NextResponse.json({ ...parseData, ...persistResult });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       {
         ok: false,
-        message:
-          "DOC_AI_API_BASE_URL이 로컬(localhost)로 설정되어 있습니다. 배포 환경에서는 외부 접근 가능한 doc-ai URL(예: Render)을 설정해야 합니다."
+        message: `파싱 API 오류: ${msg}. doc-ai(Render) 가동·방화벽·DOC_AI_API_BASE_URL 을 확인하세요.`
       },
       { status: 500 }
     );
   }
-  const forwardForm = new FormData();
-  forwardForm.append("excel_file", excelFile, excelFile.name);
-  wordFiles.forEach((file) => {
-    if (file instanceof File) {
-      forwardForm.append("word_files", file, file.name);
-    }
-  });
+}
 
-  const response = await fetch(`${docAiUrl}/parse/monthly-data`, {
-    method: "POST",
-    body: forwardForm
-  });
-
-  const rawBody = await response.text();
-  let data: ParseResponse | { detail?: string };
-  try {
-    data = rawBody ? (JSON.parse(rawBody) as ParseResponse | { detail?: string }) : { detail: "빈 응답" };
-  } catch {
-    data = { detail: "JSON 파싱 실패" };
-  }
-
-  if (!response.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        message: String((data as { detail?: string }).detail ?? "문서 파싱 중 오류가 발생했습니다.")
-      },
-      { status: response.status }
-    );
-  }
-
-  const parseData = data as ParseResponse;
-  const persistResult = await persistToSupabase(
-    parseData,
-    excelFile.name,
-    wordFiles.filter((file): file is File => file instanceof File).map((file) => file.name)
-  );
-  return NextResponse.json({ ...parseData, ...persistResult });
+function docAiUpstreamLooksHtml(snippet: string): boolean {
+  return /<\s*html[\s>]/i.test(snippet) || /<\s*!doctype\s+html/i.test(snippet);
 }
